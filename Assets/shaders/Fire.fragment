@@ -1,0 +1,120 @@
+#version 330 core
+
+in vec3 colorFragment;
+in vec2 texFragment;
+in vec3 cameraVector;
+in vec4 clipSpace;
+
+uniform sampler2D texture1; // Textura para el reflejo;
+uniform sampler2D texture2; // Textura del background;
+uniform float timeOffset; // Time Offset;
+
+out vec4 out_color;
+
+vec2 hash( vec2 p )
+{
+p = vec2( dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)) );
+return -1.0 + 2.0*fract(sin(p)*43758.5453123);
+}
+
+float noise( in vec2 p )
+{
+    const float K1 = 0.366025404; // (sqrt(3)-1)/2;
+    const float K2 = 0.211324865; // (3-sqrt(3))/6;
+
+	vec2  i = floor( p + (p.x+p.y)*K1 );
+    vec2  a = p - i + (i.x+i.y)*K2;
+    float m = step(a.y,a.x);
+    vec2  o = vec2(m,1.0-m);
+    vec2  b = a - o + K2;
+	vec2  c = a - 1.0 + 2.0*K2;
+    vec3  h = max( 0.5-vec3(dot(a,a), dot(b,b), dot(c,c) ), 0.0 );
+	vec3  n = h*h*h*h*vec3( dot(a,hash(i+0.0)), dot(b,hash(i+o)), dot(c,hash(i+1.0)));
+    return dot( n, vec3(70.0) );
+}
+
+float fbm(in vec2 uv)
+{
+	mat2 m = mat2( 1.6,  1.2, -1.2,  1.6 );
+	float f  = 0.5000*noise( uv ); uv = m*uv;
+	f += 0.2500*noise( uv ); uv = m*uv;
+	f += 0.1250*noise( uv ); uv = m*uv;
+	f += 0.0625*noise( uv ); uv = m*uv;
+	f = 0.5+ 0.5*f;
+	return f;
+}
+
+
+void main() {
+	
+	//recalculamos la x de nuestras coordenadas uv para solo considerar los puntos en torno al centro
+	//lo usaremos para hacer un degradado radial alrededor del centro inferior que tenga 0.25 de radio
+	vec2 uv2 = texFragment;
+	uv2.x = uv2.x*2 - 0.5;
+
+	//calculamos la distancia desde el el punto (0.5, 0) a nuestro punto
+	float dist = distance(uv2, vec2(0.5, 0.0));
+	dist  = clamp( dist , 0.0, 1.0);
+
+	//calculamos el ruido, usando como input nuestras uv modificadas y desplazando en el eje y por el valor de tiempo que nos venga de parámetro
+	float noiseStrength = 3.;
+	float n = fbm(noiseStrength * (uv2 - 0.5 *timeOffset * vec2(0.0, 1.0)));
+
+	//al ruido le sumamos el valor distancia para que se atenue según se aleja del foco
+	//elevamos para que se intesifique el brillo en el centro
+	float finalNoise =  1 - pow(dist + n, 2);
+	//utilizamos el ruido para hacer un color anaranjado y multiplicamos por el rudio atenuado 
+	vec3 color = 2*finalNoise * vec3(2.*n, 2.*n*n*n, n*n*n*n);
+
+	//vamos a añadir un poco de reflejo a las llamas
+	vec2 normalClip = (clipSpace.xy/clipSpace.w)/2.0 + 0.5;
+	vec2 reflectCoors = vec2(-normalClip.x, normalClip.y); 
+	//distorsionamos las coordenadas usando el ruido
+	reflectCoors += n*n*n*n*n;  //multiplicamos varias veces por sí mismo para que sea más suave (ya que n < 1)
+	vec4 reflectColor = texture(texture1,reflectCoors);
+
+	color = mix (color, reflectColor.xyz, 0.03);
+
+	//Usamos la distancia para hacer un degradado radial con mucho centro blanco y que luego rápidamente se funde a negro
+	//(la forma e intensidad de la llama)
+	float a = 1-pow(dist, 3);
+	//calculamos un degradado de abajo a arriba para que el fuego se vaya atenuendo
+	float grad1 =  (1.-pow(texFragment.y,3.));
+	//y un degradado muy sutil de arriba a abajo para que no quede muy brusco el borde del efecto
+	float grad2 =  (1 - pow(1-texFragment.y, 25.));
+	//multiplicamos el color por los degradados
+	color = 5 * grad1* a * grad2 * color ;
+
+
+	//Ahora vamos a poner el fondo, usando la imagen que recibimos como input
+	vec2 backgroundCoors = vec2(normalClip.x, normalClip.y) ;
+	//distorsionamos las cordenadas para que parezca una distorsión producida por el calor
+	//usamos de nuevo el ruido para la distorsion
+	vec2 backgroundDist = vec2( n ,0.5 * n);
+	backgroundCoors += backgroundDist * 0.01 * (grad1 * a );
+	backgroundCoors = clamp (backgroundCoors, 0.001, 0.999);
+
+	vec4 backgroundColor = texture(texture2,backgroundCoors);
+
+	//para mezclar el fuego con el fondo, pasamos el color del fuego a blanco y negro
+	float lum = 1-  (color.r+color.g+color.b)/3.0;
+	lum = clamp(lum, 0, 1);
+
+	//y usamos ese valor para hacer un mix, de forma que en las partes mas brillantes solo se ve el fuego y en el negro solo el fondo
+	//en las partes intermedias se mezclan, dando asi un efecto de transparencia en los bordes de las llamas
+	color = mix(color, backgroundColor.xyz,  lum);
+
+	//añadimos una pequeña columna de humo en el centro,  multiplicando entre si cuatro degradados cada uno en una dirección
+	float smoke = (1 - pow(texFragment.x, 5.)) * (1 - pow(1 - texFragment.x, 5.))*( 1 - pow(1-texFragment.y, 5.)) * (1 - pow(texFragment.y, 25.));;
+	//y usando de nuevo el ruido
+	smoke = pow(smoke,10.) * n *2  ;
+	color = mix(color, vec3(smoke) , smoke);
+
+	//por ultimo vamos a crear un efecto de iluminación/brillo alrededor del fuego
+	float brightness =  0.5 + 0.2 * sin(timeOffset * 5)  * sin(timeOffset * 3.8);
+	vec3 glowColor	= vec3( 0.8, 0.35, 0.1 );
+	//multiplicamos por a para que tenga la misma forma circular/de llama que el fuego
+	float fireGlow	= min( max( a * ( brightness ), 0.0 ), 1.0 );
+	color += glowColor * fireGlow * grad2; //y por el degradado para que no se vean los bordes del quad abajo y quede suave
+	out_color = vec4(vec3(color) , 1.0);
+}
